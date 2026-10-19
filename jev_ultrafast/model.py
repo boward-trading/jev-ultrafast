@@ -12,10 +12,11 @@ from .questions import NEXT_ACTION, TARGET, TEXT_VALUE
 CLIENT = httpx.Client(http2=True, timeout=25)
 
 
-def post_json(url, key, body):
+def post_json(url, key, body, headers=None):
+    request_headers = {"Authorization": f"Bearer {key}", **(headers or {})}
     for attempt in range(3):
         try:
-            response = CLIENT.post(url, json=body, headers={"Authorization": f"Bearer {key}"})
+            response = CLIENT.post(url, json=body, headers=request_headers)
         except httpx.HTTPError:
             raise RuntimeError("Model connection failed; no action executed.") from None
         if response.status_code in {429, 529, 503} and attempt < 2:
@@ -157,10 +158,25 @@ def field_context(goal, action, page, history):
     }
 
 
+def text_headers():
+    """Extra headers for the text helper (TEXT_MODEL_HEADERS, a JSON object), e.g. a gateway's tool or effort knobs."""
+    raw = os.environ.get("TEXT_MODEL_HEADERS")
+    if not raw:
+        return {}
+    try:
+        headers = json.loads(raw)
+    except ValueError:
+        headers = None
+    if not isinstance(headers, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in headers.items()):
+        raise ValueError("TEXT_MODEL_HEADERS must be a JSON object of string header values.")
+    return headers
+
+
 def field_text(context):
     key = os.environ.get("TEXT_MODEL_API_KEY")
     if not key:
         raise ValueError("TYPE_TEXT needs TEXT_MODEL_API_KEY; no text is hardcoded or guessed by the executor.")
+    headers = text_headers()
     base = os.environ.get("TEXT_MODEL_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
     model = os.environ.get("TEXT_MODEL", "deepseek-chat")
     reasoning = {"thinking": {"type": "disabled"}} if "api.deepseek.com/" in base else {"reasoning": {"effort": "low"}}
@@ -183,6 +199,7 @@ def field_text(context):
                 },
             ],
         },
+        **({"headers": headers} if headers else {}),
     )
     try:
         output = json.loads(result["choices"][0]["message"]["content"])

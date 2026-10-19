@@ -55,7 +55,7 @@ There are no site-specific action scripts or prepared field strings in the polic
 ```bash
 git clone https://github.com/browser-use/jev-ultrafast.git
 cd jev-ultrafast
-uv sync
+uv sync --extra chrome
 cp .env.example .env
 # Add TYPESAFE_API_KEY and TEXT_MODEL_API_KEY.
 uv run jev
@@ -63,7 +63,7 @@ uv run jev
 
 Open **http://127.0.0.1:8766** and click **Start demo → Run automatically**. The inspector shows numbered elements, operation probabilities, target probabilities, and executed actions. **Choose next** pauses before execution.
 
-Chrome connects through [Browser Harness](https://github.com/browser-use/browser-harness), installed by `uv sync`. Run `uv run browser-harness --doctor` if it needs connecting. Allow remote debugging in Chrome when prompted.
+Chrome connects through [Browser Harness](https://github.com/browser-use/browser-harness), installed by `uv sync --extra chrome`. Run `uv run browser-harness --doctor` if it needs connecting. Allow remote debugging in Chrome when prompted.
 
 `TEXT_MODEL_API_KEY` is an OpenRouter key in the example configuration. The current demo uses `inception/mercury-2.5` with reasoning disabled. Gemini, GLM, and DeepSeek can also use the OpenAI-compatible text helper; configure the appropriate model, endpoint, and reasoning setting.
 
@@ -91,6 +91,23 @@ uv run --env-file .env python examples/run.py \
 
 `uv run --env-file .env python examples/flights.py --keep-open` performs the flight search, checks the actual route/date/results, and saves its trace. It does not select or book a flight.
 
+### Any Playwright page
+
+The same loop runs on a page you already hold, with no CDP and no Browser Harness: Firefox, Camoufox or Chromium, headless or a logged-in persistent profile. Install the `playwright` extra and inject the backend; your code owns the page and the agent never closes it.
+
+```python
+from playwright.sync_api import sync_playwright
+from jev_ultrafast import Agent
+from jev_ultrafast.playwright_browser import PlaywrightBrowser
+
+with sync_playwright() as pw:
+    page = pw.firefox.launch().new_page()
+    browser = PlaywrightBrowser(page, "https://en.wikipedia.org/wiki/Main_Page")
+    with Agent(None, "Open the article about Gödel's incompleteness theorems.", browser=browser) as agent:
+        for state in agent.run():
+            print(state["elapsed_ms"], state["status"])
+```
+
 ## Why it moves
 
 - **One request per decision cycle.** Operation and target heads share the same observed state.
@@ -111,6 +128,7 @@ Every executed target is resolved from an observed node. The executor rechecks p
 | [agent.py](jev_ultrafast/agent.py) | The complete loop and text-helper handoff |
 | [snapshot.js](jev_ultrafast/snapshot.js) | Atomic DOM snapshot, indexed controls, freshness guards |
 | [browser.py](jev_ultrafast/browser.py) | Browser connection, current geometry, execution |
+| [playwright_browser.py](jev_ultrafast/playwright_browser.py) | The same browser contract on a Playwright page: Firefox, Camoufox or Chromium without CDP |
 | [model.py](jev_ultrafast/model.py) | Dynamic operation/target heads and text generation |
 | [questions.py](jev_ultrafast/questions.py) | Model instructions |
 | [demo.py](jev_ultrafast/demo.py) | Local inspector |
