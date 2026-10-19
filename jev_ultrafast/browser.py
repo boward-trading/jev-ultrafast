@@ -6,12 +6,64 @@ import sys
 import time
 from pathlib import Path
 
-from browser_harness.admin import ensure_daemon
-from browser_harness.helpers import cdp
-
 # Atomically read visible content and controls, preserving actual DOM node identity.
 READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
+
+# Settle after input: two animation frames, or visible autocomplete options, capped at 200 ms.
+SETTLE = """(action => new Promise(resolve => {
+                      const field=window.__jevFast?.nodes.get(action.node);
+                      const autocomplete=action.kind==='fill' && field?.getAttribute('role')==='combobox';
+                      let frames=0, stopped=false;
+                      const finish=()=>{stopped=true;resolve()};
+                      setTimeout(finish,autocomplete ? 200 : 50);
+                      const ready=()=>{
+                        if (stopped) return;
+                        const ids=(field?.getAttribute('aria-controls')||field?.getAttribute('aria-owns')||'')
+                          .split(/\\s+/).filter(Boolean);
+                        const roots=ids.length ? ids.map(id=>document.getElementById(id)).filter(Boolean) : [document];
+                        const options=roots.flatMap(root=>[...root.querySelectorAll('[role="option"]')]);
+                        if (++frames>=2 && (!autocomplete || options.some(e=>{
+                          const r=e.getBoundingClientRect();
+                          return r.width && r.height && r.bottom>0 && r.top<innerHeight &&
+                            e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
+                        }))) finish();
+                        else requestAnimationFrame(ready);
+                      };
+                      requestAnimationFrame(ready);
+                    }))"""
+
+# Resolve an observed node to its click point, rejecting covered, disabled or changed controls.
+RESOLVE = """(action => {
+              const e=window.__jevFast?.nodes.get(action.node);
+              if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]') ||
+                  !e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return null;
+              if (action.kind==='fill' && (e.readOnly || e.getAttribute('aria-readonly')==='true')) return null;
+              const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
+              if (!r.width || !r.height || x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;
+              if (!e.contains(document.elementFromPoint(x,y))) return null;
+              if (action.kind==='select') {
+                if (e.tagName!=='SELECT' || ![...e.options].some(o=>o.value===action.value &&
+                    !o.disabled && !o.closest('optgroup[disabled]'))) return null;
+                e.value=action.value;
+                e.dispatchEvent(new Event('input',{bubbles:true}));
+                e.dispatchEvent(new Event('change',{bubbles:true}));
+              }
+              return {x,y};
+            })"""
+
+
+def ensure_daemon():
+    """Start Browser Harness; imported lazily so the Playwright backend needs no CDP stack."""
+    from browser_harness.admin import ensure_daemon as start
+
+    return start()
+
+
+def cdp(method, **params):
+    from browser_harness.helpers import cdp as call
+
+    return call(method, **params)
 
 class StalePage(ValueError):
     """A decision no longer refers to the observed page."""
@@ -48,27 +100,7 @@ class Browser:
             try:
                 self.call(
                     "Runtime.evaluate",
-                    expression="""(action => new Promise(resolve => {
-                      const field=window.__jevFast?.nodes.get(action.node);
-                      const autocomplete=action.kind==='fill' && field?.getAttribute('role')==='combobox';
-                      let frames=0, stopped=false;
-                      const finish=()=>{stopped=true;resolve()};
-                      setTimeout(finish,autocomplete ? 200 : 50);
-                      const ready=()=>{
-                        if (stopped) return;
-                        const ids=(field?.getAttribute('aria-controls')||field?.getAttribute('aria-owns')||'')
-                          .split(/\\s+/).filter(Boolean);
-                        const roots=ids.length ? ids.map(id=>document.getElementById(id)).filter(Boolean) : [document];
-                        const options=roots.flatMap(root=>[...root.querySelectorAll('[role="option"]')]);
-                        if (++frames>=2 && (!autocomplete || options.some(e=>{
-                          const r=e.getBoundingClientRect();
-                          return r.width && r.height && r.bottom>0 && r.top<innerHeight &&
-                            e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
-                        }))) finish();
-                        else requestAnimationFrame(ready);
-                      };
-                      requestAnimationFrame(ready);
-                    }))(""" + json.dumps(action) + ")",
+                    expression=SETTLE + "(" + json.dumps(action) + ")",
                     awaitPromise=True,
                     returnByValue=True,
                 )
@@ -141,23 +173,7 @@ def browser_operation(request):
             if type(action["node"]) is not int:
                 raise ValueError("Invalid observed node")
             # Code-owned node IDs refer to actual observed elements, never model-generated selectors.
-            target = evaluate("""(action => {
-              const e=window.__jevFast?.nodes.get(action.node);
-              if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]') ||
-                  !e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return null;
-              if (action.kind==='fill' && (e.readOnly || e.getAttribute('aria-readonly')==='true')) return null;
-              const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
-              if (!r.width || !r.height || x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;
-              if (!e.contains(document.elementFromPoint(x,y))) return null;
-              if (action.kind==='select') {
-                if (e.tagName!=='SELECT' || ![...e.options].some(o=>o.value===action.value &&
-                    !o.disabled && !o.closest('optgroup[disabled]'))) return null;
-                e.value=action.value;
-                e.dispatchEvent(new Event('input',{bubbles:true}));
-                e.dispatchEvent(new Event('change',{bubbles:true}));
-              }
-              return {x,y};
-            })(""" + json.dumps(action) + ")")
+            target = evaluate(RESOLVE + "(" + json.dumps(action) + ")")
             if target is None:
                 if kind == "select":
                     raise RuntimeError("Dropdown execution was not confirmed; inspect before retrying.")
